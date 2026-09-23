@@ -1,0 +1,53 @@
+/* 羽球雙打排程 - 自訂樣式（色彩 token、深色模式、燈箱與提示動畫、安全區、焦點樣式）
+   其餘版面樣式由 Tailwind CSS（CDN）的 utility class 提供 */
+  :root {
+    --page: #eef1f0; --panel: #ffffff; --soft: #e3e9e6; --line: #cdd6d2;
+    --ink: #0f1b16; --mute: #5a6861; --brand: #17604a; --brandink: #ffffff;
+    --court: #1d6b52; --courtwait: #5f8a79; --courtline: #e6f2ec;
+    --chipa: #ffffff; --chipaink: #0f1b16; --chipb: #f2b632; --chipbink: #2a1d02;
+    --warn: #a34a00; --flash: #ff6b5b;
+    --gm: #2b64c8; --gmink: #ffffff; --gf: #c2337c; --gfink: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page: #0c1411; --panel: #121d18; --soft: #1b2924; --line: #27372f;
+      --ink: #e6efe9; --mute: #91a39a; --brand: #5bcb95; --brandink: #06140d;
+      --court: #15523f; --courtwait: #2a4b40; --courtline: #cfe5da;
+      --chipa: #ffffff; --chipaink: #0f1b16; --chipb: #f2b632; --chipbink: #2a1d02;
+      --warn: #f2b632; --flash: #ff6b5b;
+      --gm: #6aa6f5; --gmink: #08172e; --gf: #f28cbf; --gfink: #2a0b1a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #0c1411; --panel: #121d18; --soft: #1b2924; --line: #27372f;
+    --ink: #e6efe9; --mute: #91a39a; --brand: #5bcb95; --brandink: #06140d;
+    --court: #15523f; --courtwait: #2a4b40; --courtline: #cfe5da;
+    --chipa: #ffffff; --chipaink: #0f1b16; --chipb: #f2b632; --chipbink: #2a1d02;
+    --warn: #f2b632; --flash: #ff6b5b;
+    --gm: #6aa6f5; --gmink: #08172e; --gf: #f28cbf; --gfink: #2a0b1a;
+  }
+  :root { box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  html { color-scheme: light dark; }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  body { background: var(--page); color: var(--ink); font-family: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  body { overflow-x: clip; }
+  button, input, summary { font: inherit; }
+  button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+  button { cursor: pointer; }
+  button:disabled { cursor: not-allowed; }
+  summary::-webkit-details-marker { display: none; }
+  .chip-ring { transition: box-shadow .25s ease; }
+  /* 燈箱（FancyBox 風格）：淡入放大 / 淡出縮小 */
+  @keyframes fb-fade-in { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes fb-fade-out { from { opacity: 1; } to { opacity: 0; } }
+  @keyframes fb-pop-in { from { opacity: 0; transform: translateY(14px) scale(.96); } to { opacity: 1; transform: none; } }
+  @keyframes fb-pop-out { from { opacity: 1; transform: none; } to { opacity: 0; transform: translateY(8px) scale(.97); } }
+  .fb-backdrop { animation: fb-fade-in .18s ease-out both; }
+  .fb-backdrop.fb-out { animation: fb-fade-out .16s ease-in both; }
+  .fb-panel { animation: fb-pop-in .24s cubic-bezier(.2, .8, .2, 1) both; }
+  .fb-panel.fb-out { animation: fb-pop-out .16s ease-in both; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .toast-in { animation: toast-in .2s ease-out both; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } .fb-backdrop, .fb-panel, .toast-in { animation: none !important; } }
