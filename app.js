@@ -42,6 +42,7 @@
  * @property {string} id
  * @property {[string,string]} teamA   A 組球員 id
  * @property {[string,string]} teamB   B 組球員 id
+ * @property {number} [startedAt]      這組被排上場地的時間戳（Date.now()）；只有上場區的組合才有，用來算「已進行多久」。換人、互換位置不會重設這個時間，只有換成全新的一組才會。
  */
 
 /**
@@ -94,7 +95,7 @@ function createSession(playersInput, options = {}) {
   const order = shuffle(players.map((p) => p.id), rng);
 
   const s = { players, courts: Array(courtCount).fill(null), queue: [], pending: order.slice(4 * courtCount), history: [], seq: 0 };
-  for (let c = 0; c < courtCount; c++) s.courts[c] = makeGroup(s, order.slice(4 * c, 4 * c + 4), rng);
+  for (let c = 0; c < courtCount; c++) s.courts[c] = { ...makeGroup(s, order.slice(4 * c, 4 * c + 4), rng), startedAt: Date.now() };
   fillQueue(s, rng);
   return s;
 }
@@ -127,7 +128,7 @@ function finishCourt(session, courtIndex, options = {}) {
 
   fillQueue(s, rng); // 湊滿 4 人就成組
   if (options.mix !== false) mixFront(s, games);
-  s.courts[courtIndex] = s.queue.shift(); // 最前面的一組上場（pending 已 ≥4，所以一定有）
+  s.courts[courtIndex] = { ...s.queue.shift(), startedAt: Date.now() }; // 最前面的一組上場（pending 已 ≥4，所以一定有）
   return s;
 }
 
@@ -165,6 +166,67 @@ function reshuffleWaiting(session, options = {}) {
   s.pending = shuffle(waiting, rng);
   fillQueue(s, rng);
   return s;
+}
+
+/**
+ * 讓某位球員中途離場：從目前所在位置移除（上場區／等待區／候補都可以）。
+ *   - 在等待區或候補：直接移除，剩下的人依原順序重新湊組。
+ *   - 在上場區：從等待區最前面遞補 1 人上來；如果沒有人可以遞補，
+ *     就關閉這個場地，該場其餘 3 人回到等待區重新湊組。
+ * 球員仍保留在 session.players（標記 left: true），已結束的比賽紀錄不會受影響、
+ * 名字也不會消失；之後的排程不會再把他排進去。
+ * @param {Session} session
+ * @param {string} id
+ * @param {{rng?: () => number}} [options]
+ * @returns {Session}
+ */
+function leavePlayer(session, id, options = {}) {
+  const rng = options.rng || Math.random;
+  const s = clone(session);
+  s.players = s.players.map((p) => (p.id === id ? { ...p, left: true } : p));
+
+  if (s.pending.indexOf(id) !== -1) {
+    s.pending = s.pending.filter((x) => x !== id);
+    return s;
+  }
+
+  const inQueue = s.queue.some((g) => g.teamA.indexOf(id) !== -1 || g.teamB.indexOf(id) !== -1);
+  if (inQueue) {
+    const flat = s.queue.flatMap((g) => g.teamA.concat(g.teamB)).concat(s.pending).filter((x) => x !== id);
+    s.queue = [];
+    s.pending = flat;
+    fillQueue(s, rng);
+    return s;
+  }
+
+  const courtIdx = s.courts.findIndex((g) => g && (g.teamA.indexOf(id) !== -1 || g.teamB.indexOf(id) !== -1));
+  if (courtIdx !== -1) {
+    const group = s.courts[courtIdx];
+    const team = group.teamA.indexOf(id) !== -1 ? "teamA" : "teamB";
+    const slot = group[team].indexOf(id);
+    const flat = s.queue.flatMap((g) => g.teamA.concat(g.teamB)).concat(s.pending);
+
+    if (flat.length === 0) {
+      // 沒有人可以遞補：關閉這個場地，其餘 3 人回到等待區
+      const rest = group.teamA.concat(group.teamB).filter((x) => x !== id);
+      s.courts = s.courts.filter((_, i) => i !== courtIdx);
+      s.queue = [];
+      s.pending = rest;
+      fillQueue(s, rng);
+      return s;
+    }
+
+    const replacement = flat[0];
+    s.queue = [];
+    s.pending = flat.slice(1);
+    fillQueue(s, rng);
+    const newTeam = group[team].slice();
+    newTeam[slot] = replacement;
+    s.courts[courtIdx] = { ...group, [team]: newTeam };
+    return s;
+  }
+
+  return s; // 已經離場，或不在任何位置
 }
 
 /* ------------------------------------------------------------------ *
@@ -409,15 +471,16 @@ function startSession(players, courts) {
 /** 讀回存檔的排程時做基本檢查，不合格就回傳 null（重新開始） */
 function restoreSession(s) {
   const ok =
-    s && Array.isArray(s.players) && Array.isArray(s.courts) && s.courts.length > 0 &&
+    s && Array.isArray(s.players) && Array.isArray(s.courts) &&
     Array.isArray(s.queue) && Array.isArray(s.pending) && Array.isArray(s.history) && typeof s.sig === "string";
   if (!ok) return null;
-  const ids = new Set(s.players.map((p) => p.id));
+  // 中途離場的人仍留在 players 裡（標記 left），但不會出現在任何區域，所以只用「未離場」的人數來核對
+  const activeIds = new Set(s.players.filter((p) => !p.left).map((p) => p.id));
   const seen = [];
   s.courts.forEach((g) => g && seen.push(...g.teamA, ...g.teamB));
   s.queue.forEach((g) => seen.push(...g.teamA, ...g.teamB));
   seen.push(...s.pending);
-  if (s.courts.some((g) => !g) || seen.length !== ids.size || seen.some((id) => !ids.has(id))) return null;
+  if (s.courts.some((g) => !g) || seen.length !== activeIds.size || seen.some((id) => !activeIds.has(id))) return null;
   return { ...s, players: s.players.map((p) => ({ ...p, gender: p.gender === "M" || p.gender === "F" ? p.gender : null })) };
 }
 
@@ -462,6 +525,8 @@ function boardToText(s) {
   s.queue.forEach((g, i) => out.push((i === 0 ? "下一場" : "第 " + (i + 1) + " 組") + "：" + line(g)));
   if (s.pending.length) out.push("候補：" + names(s.pending));
   if (!s.queue.length && !s.pending.length) out.push("（目前沒有人在等待）");
+  const left = s.players.filter((p) => p.left).map((p) => p.name);
+  if (left.length) out.push("", "離場：" + left.join("、"));
   return out.join("\n");
 }
 
@@ -529,6 +594,7 @@ const ICON = {
   list: "M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
   board: "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z",
   sliders: "M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4",
+  leave: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
 };
 const Ico = (d, cls) =>
   h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", className: cls || "h-4 w-4", "aria-hidden": true }, h("path", { d }));
@@ -549,6 +615,37 @@ const BTN_PRIMARY = "inline-flex items-center justify-center gap-1.5 rounded-lg 
 const BTN_GHOST = "inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-sm hover:bg-soft";
 const BTN_LINK = "rounded px-1.5 py-0.5 text-xs text-mute underline-offset-2 hover:text-ink hover:underline";
 
+
+/* ------------------------------------------------------------------ *
+ * 計時器：顯示某個場地已經開打多久（mm:ss，超過 1 小時變 h:mm:ss）
+ *   每秒鐘只有自己重新算一次，不會拖著整個畫面一起重繪。
+ * ------------------------------------------------------------------ */
+function Timer({ startedAt }) {
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const sec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  const h = Math.floor(m / 60);
+  const text = (h > 0 ? h + ":" + String(m % 60).padStart(2, "0") : m) + ":" + String(s).padStart(2, "0");
+  return span(
+    { className: "inline-flex items-center gap-1 tabular-nums", title: "這場已經開打 " + text },
+    ClockIcon(),
+    text
+  );
+}
+/** 內嵌一顆時鐘圖示，不透過 Ico()（那個只支援單一 path），供 Timer 使用 */
+function ClockIcon() {
+  return h(
+    "svg",
+    { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", className: "h-3 w-3 shrink-0 opacity-80", "aria-hidden": true },
+    h("circle", { cx: 12, cy: 12, r: 9 }),
+    h("polyline", { points: "12 7 12 12 15.5 14" })
+  );
+}
 
 /* ------------------------------------------------------------------ *
  * 球場：每一組以「俯視球場」呈現，A 組在左半場、B 組在右半場
@@ -574,7 +671,15 @@ function Court({ variant, children }) {
 /* ------------------------------------------------------------------ *
  * 球員按鈕 + 下拉選單
  * ------------------------------------------------------------------ */
-function PlayerSlot({ name, gender, tone, wrap, inner, isOpen, flash, align, onToggle, onClose, children }) {
+/** 已打場數的小徽章：彩色球隊底色上用半透明黑；候補的白底用 soft 灰 */
+function GamesBadge({ n, dim }) {
+  return span(
+    { className: cx("grid h-5 min-w-[1.35rem] shrink-0 place-items-center rounded-full px-1 text-[10px] font-bold tabular-nums", dim ? "bg-soft text-mute" : "bg-black/10 text-current"), title: "已打 " + n + " 場" },
+    n
+  );
+}
+
+function PlayerSlot({ name, gender, games, badgeDim, tone, wrap, inner, isOpen, flash, align, onToggle, onClose, children }) {
   const ref = useRef(null);
   const [up, setUp] = useState(false);
   useLayoutEffect(() => {
@@ -630,50 +735,62 @@ function PlayerSlot({ name, gender, tone, wrap, inner, isOpen, flash, align, onT
           ),
         },
         span({ className: "flex min-w-0 items-center gap-1.5" }, GenderMark({ g: gender }), span({ className: "truncate" }, name)),
-        Ico(ICON.down, "h-3.5 w-3.5 shrink-0 opacity-60")
+        span({ className: "flex shrink-0 items-center gap-1" }, games !== undefined && h(GamesBadge, { n: games, dim: badgeDim }), Ico(ICON.down, "h-3.5 w-3.5 opacity-60"))
       ),
       isOpen && children ? React.cloneElement(children, { up }) : null
     )
   );
 }
 
-function SwapMenu({ title, groups, align, up, onPick }) {
+function SwapMenu({ title, groups, align, up, onPick, onLeave }) {
   return div(
     {
       role: "listbox",
       className: cx(
-        "absolute z-30 max-h-80 w-64 scroll-mb-24 overflow-y-auto rounded-xl border border-line bg-panel text-ink shadow-xl",
+        "absolute z-30 flex max-h-80 w-64 flex-col overflow-hidden rounded-xl border border-line bg-panel text-ink shadow-xl",
         up ? "bottom-full mb-1.5" : "top-full mt-1.5",
         align === "right" ? "right-0" : "left-0"
       ),
     },
-    div({ className: "sticky top-0 border-b border-line bg-panel px-3 py-2" }, div({ className: "text-sm font-bold" }, title), div({ className: "text-xs font-normal text-mute" }, "選擇要互換位置的人")),
-    groups.map((g) =>
-      g.items.length === 0
-        ? null
-        : div(
-            { key: g.key },
-            div({ className: "px-3 pb-0.5 pt-2 text-xs font-medium text-mute" }, g.title),
-            g.items.map((o) =>
-              btn(
-                {
-                  key: o.id,
-                  type: "button",
-                  role: "option",
-                  "aria-selected": false,
-                  onClick: () => onPick(o.id),
-                  className: "flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm font-medium hover:bg-soft",
-                },
-                span({ className: "flex min-w-0 items-center gap-1.5" }, GenderMark({ g: o.gender }), span({ className: "truncate" }, o.name)),
-                span(
-                  { className: "flex shrink-0 items-center gap-1.5 text-xs font-normal text-mute" },
-                  o.tag && span({ className: "rounded bg-soft px-1.5 py-0.5" }, o.tag),
-                  span({ className: "tabular-nums" }, "已打 " + o.games + " 場")
+    div(
+      { className: "min-h-0 flex-1 scroll-mb-24 overflow-y-auto" },
+      div({ className: "sticky top-0 border-b border-line bg-panel px-3 py-2" }, div({ className: "text-sm font-bold" }, title), div({ className: "text-xs font-normal text-mute" }, "選擇要互換位置的人")),
+      groups.map((g) =>
+        g.items.length === 0
+          ? null
+          : div(
+              { key: g.key },
+              div({ className: "px-3 pb-0.5 pt-2 text-xs font-medium text-mute" }, g.title),
+              g.items.map((o) =>
+                btn(
+                  {
+                    key: o.id,
+                    type: "button",
+                    role: "option",
+                    "aria-selected": false,
+                    onClick: () => onPick(o.id),
+                    className: "flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm font-medium hover:bg-soft",
+                  },
+                  span({ className: "flex min-w-0 items-center gap-1.5" }, GenderMark({ g: o.gender }), span({ className: "truncate" }, o.name)),
+                  span(
+                    { className: "flex shrink-0 items-center gap-1.5 text-xs font-normal text-mute" },
+                    o.tag && span({ className: "rounded bg-soft px-1.5 py-0.5" }, o.tag),
+                    span({ className: "tabular-nums" }, "已打 " + o.games + " 場")
+                  )
                 )
               )
             )
-          )
-    )
+      )
+    ),
+    onLeave &&
+      div(
+        { className: "shrink-0 border-t border-line p-1.5" },
+        btn(
+          { type: "button", onClick: onLeave, className: "flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold text-warn hover:bg-warn/10" },
+          Ico(ICON.leave, "h-4 w-4"),
+          "此人離場，不再排入"
+        )
+      )
   );
 }
 
@@ -690,6 +807,8 @@ function Slot({ id, group, team, slotKey, tone, wrap, inner, align, ctx }) {
     {
       name: p ? p.name : "?",
       gender: p ? p.gender || null : null,
+      games: ctx.games[id] || 0,
+      badgeDim: tone === TONE_WAIT,
       tone,
       wrap,
       inner,
@@ -705,6 +824,7 @@ function Slot({ id, group, team, slotKey, tone, wrap, inner, align, ctx }) {
           groups: menuGroups(ctx.where, ctx.players, ctx.games, group, team, id),
           align,
           onPick: (newId) => ctx.onPick(id, newId),
+          onLeave: ctx.onLeave ? () => ctx.onLeave(id) : undefined,
         })
       : null
   );
@@ -880,15 +1000,27 @@ function Modal({ tabs, active, onTab, onClose, children }) {
  * 燈箱內容：球員狀態（誰打了幾場、現在在哪）
  * ------------------------------------------------------------------ */
 function StatusContent({ session, byId, where, games, counter }) {
-  const rows = session.players.map((p) => ({ id: p.id, name: p.name, gender: p.gender || null, games: games[p.id] || 0, at: where.get(p.id) }));
+  const rowOf = (p) => ({ id: p.id, name: p.name, gender: p.gender || null, games: games[p.id] || 0, at: where.get(p.id) });
+  const rows = session.players.filter((p) => !p.left).map(rowOf);
+  const leftRows = session.players.filter((p) => p.left).map(rowOf);
   const vals = rows.map((r) => r.games);
-  const spread = Math.max.apply(null, vals) - Math.min.apply(null, vals);
+  const spread = vals.length ? Math.max.apply(null, vals) - Math.min.apply(null, vals) : 0;
   const mix = teamMix(session.history.concat(session.courts.filter(Boolean)), byId);
   const mixText =
     mix.mixed + mix.men + mix.women > 0
       ? "隊伍組成（已結束加上場中）：混雙 " + mix.mixed + " 組、男雙 " + mix.men + " 組、女雙 " + mix.women + " 組" + (mix.unknown ? "（另有 " + mix.unknown + " 組含未指定性別）" : "") + "。"
       : "";
   const th = "sticky top-0 bg-panel pb-1.5 pt-1 text-xs font-normal text-mute";
+  const gridRow = (r, muted) =>
+    h(
+      React.Fragment,
+      { key: r.id },
+      span({ className: cx("flex min-w-0 items-center gap-1.5", muted && "opacity-60") }, GenderMark({ g: r.gender }), span({ className: "truncate" }, r.name)),
+      span({ className: cx("text-right tabular-nums", muted && "opacity-60") }, r.games),
+      muted
+        ? span({ className: "truncate text-xs text-mute" }, "已離場")
+        : span({ className: cx("truncate text-xs", r.at && r.at.zone === "court" ? "font-bold text-brand" : "text-mute") }, r.at ? r.at.label : "")
+    );
   return div(
     null,
     div(
@@ -897,22 +1029,20 @@ function StatusContent({ session, byId, where, games, counter }) {
       span(null, "場數差 ", span({ className: "font-bold tabular-nums" }, spread)),
       span({ className: counter.partnerRepeats > 0 ? "text-warn" : "" }, "隊友重複 ", span({ className: "font-bold tabular-nums" }, counter.partnerRepeats))
     ),
-    para({ className: "mb-3 text-xs text-mute" }, "「已打」只計算已結束的比賽；「目前」是此刻所在的位置。" + mixText),
+    para({ className: "mb-3 text-xs text-mute" }, "「已打」只計算已結束的比賽；「目前」是此刻所在的位置；場數差只計算仍在場上的人。" + mixText),
     div(
       { className: "grid grid-cols-[minmax(0,1fr)_3.5rem_6.5rem] items-baseline gap-x-2 gap-y-1.5 text-sm" },
       span({ className: th }, "球員"),
       span({ className: cx(th, "text-right") }, "已打"),
       span({ className: th }, "目前"),
-      rows.map((r) =>
-        h(
-          React.Fragment,
-          { key: r.id },
-          span({ className: "flex min-w-0 items-center gap-1.5" }, GenderMark({ g: r.gender }), span({ className: "truncate" }, r.name)),
-          span({ className: "text-right tabular-nums" }, r.games),
-          span({ className: cx("truncate text-xs", r.at && r.at.zone === "court" ? "font-bold text-brand" : "text-mute") }, r.at ? r.at.label : "")
-        )
+      rows.map((r) => gridRow(r, false))
+    ),
+    leftRows.length > 0 &&
+      div(
+        { className: "mt-4" },
+        div({ className: "mb-1.5 text-xs font-medium text-mute" }, "已離場"),
+        div({ className: "grid grid-cols-[minmax(0,1fr)_3.5rem_6.5rem] items-baseline gap-x-2 gap-y-1.5 text-sm" }, leftRows.map((r) => gridRow(r, true)))
       )
-    )
   );
 }
 
@@ -1168,9 +1298,14 @@ function App() {
     setNotice("");
   };
 
-  /* ---- 排程操作（每一步都可復原） ---- */
-  function commit(next, message, flashIds) {
-    setUndo((u) => (session ? u.concat([session]).slice(-40) : u));
+  /* ---- 排程操作（每一步都可復原） ----
+   * 大部分操作只改 session；「離場」還會同時把人從名單移除、可能連場地數都變，
+   * 所以復原堆疊記錄的是 { session, players, courts } 這一組快照，一次全部復原。
+   */
+  function commit(next, message, flashIds, opts) {
+    setUndo((u) => (session ? u.concat([{ session, players, courts }]).slice(-40) : u));
+    if (opts && opts.players) setPlayers(opts.players);
+    if (opts && opts.courts !== undefined) setCourts(opts.courts);
     setSession(next);
     setMsg(message ? { text: message, undo: true } : null);
     setFlash(flashIds ? { ids: flashIds } : null);
@@ -1178,7 +1313,10 @@ function App() {
   }
   function undoLast() {
     if (undo.length === 0) return;
-    setSession(undo[undo.length - 1]);
+    const last = undo[undo.length - 1];
+    setSession(last.session);
+    setPlayers(last.players);
+    setCourts(last.courts);
     setUndo(undo.slice(0, -1));
     setMsg({ text: "已復原上一步。", undo: false });
     setFlash(null);
@@ -1205,6 +1343,30 @@ function App() {
   }
   function reshuffle() {
     commit(reshuffleWaiting(session), "已重新打散等待區。");
+  }
+  function leave(id) {
+    const name = byId[id] ? byId[id].name : "?";
+    const oldCourts = session.courts;
+    const next = leavePlayer(session, id);
+    const newRoster = players.filter((p) => p.id !== id);
+
+    const courtIdx = oldCourts.findIndex((g) => g && (g.teamA.indexOf(id) !== -1 || g.teamB.indexOf(id) !== -1));
+    let message;
+    if (courtIdx !== -1 && next.courts.length < oldCourts.length) {
+      message = name + " 已離場。人數不足，場地 " + (courtIdx + 1) + " 已關閉。";
+    } else if (courtIdx !== -1) {
+      const oldIds = oldCourts[courtIdx].teamA.concat(oldCourts[courtIdx].teamB);
+      const newIds = next.courts[courtIdx].teamA.concat(next.courts[courtIdx].teamB);
+      const replId = newIds.find((x) => oldIds.indexOf(x) === -1);
+      const replName = replId && byId[replId] ? byId[replId].name : replId;
+      message = name + " 已離場" + (replName ? "，" + replName + " 遞補上場。" : "。");
+    } else {
+      message = name + " 已離場。";
+    }
+
+    // 場地數若因離場而變少，順便同步「場次設定」裡的場地數，這樣的變更不算「已變更」，不用重新開始
+    const courtsChanged = next.courts.length !== oldCourts.length;
+    commit({ ...next, sig: makeSig(newRoster, next.courts.length) }, message, null, { players: newRoster, courts: courtsChanged ? next.courts.length : courts });
   }
   function openModal(key) {
     setOpenKey(null); // 先收起換人選單
@@ -1378,7 +1540,7 @@ function App() {
   );
 
   /* ---------------- 右側：上場區 / 等待區 ---------------- */
-  const ctx = session && { byId, where, games, counter, players: session.players, openKey, setOpenKey, flash, onPick: pick };
+  const ctx = session && { byId, where, games, counter, players: session.players, openKey, setOpenKey, flash, onPick: pick, onLeave: leave };
 
   const toolbar = div(
     { className: "mb-4 flex flex-wrap items-end justify-between gap-2" },
@@ -1421,6 +1583,7 @@ function App() {
                 group: g,
                 variant: "live",
                 title: "場地 " + (i + 1),
+                sub: g.startedAt && h(Timer, { startedAt: g.startedAt }),
                 ctx,
                 action: btn(
                   { type: "button", onClick: () => finish(i), "aria-label": "結束場地 " + (i + 1) + " 的比賽", className: cx(BTN_PRIMARY, "!px-3 !py-1.5") },
@@ -1557,6 +1720,7 @@ function App() {
                 group: g,
                 kind: "live",
                 title: "場地 " + (i + 1),
+                sub: g.startedAt && h(Timer, { startedAt: g.startedAt }),
                 ctx,
                 action: btn(
                   { type: "button", onClick: () => finish(i), "aria-label": "結束場地 " + (i + 1) + " 的比賽", className: "inline-flex items-center gap-1 rounded-lg bg-chipa px-3.5 py-1.5 text-sm font-bold text-chipaink" },
