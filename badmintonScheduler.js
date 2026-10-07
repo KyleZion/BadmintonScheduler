@@ -34,6 +34,8 @@
  * @property {string} id
  * @property {string} name
  * @property {'M'|'F'|null} gender   'M' 男、'F' 女、null 未指定
+ * @property {boolean} [stay]        連打：true 時，只要他所在的場地結束，他會直接留在原地打下一場，
+ *                                   不回等待區排隊，無視「打一休一」的公平排程，直到手動關閉為止。
  */
 
 /**
@@ -102,7 +104,8 @@ export function createSession(playersInput, options = {}) {
 
 /**
  * 某個場地比賽結束：
- *   人員清空 → 回到等待區隊尾 → 等待區最前面的一組推上該場地
+ *   沒標記「連打」的人回到等待區隊尾 → 等待區最前面補上空缺 → 標記「連打」的人直接留在原地
+ *   （整組都沒人連打時，就是原本的行為：全部清空，換等待區最前面的一組上場）
  * @param {Session} session
  * @param {number} courtIndex  從 0 開始
  * @param {{rng?: () => number, mix?: boolean}} [options]  mix 預設 true（見上方「混搭」說明）
@@ -115,21 +118,55 @@ export function finishCourt(session, courtIndex, options = {}) {
 
   const s = clone(session);
   s.history.push({ id: match.id, seq: s.history.length + 1, court: courtIndex + 1, teamA: match.teamA, teamB: match.teamB });
-  s.courts[courtIndex] = null;
 
-  // 結束的 4 人回到隊尾：已打場數少的排前面（同數量隨機）
+  const stayOf = {};
+  s.players.forEach((p) => (stayOf[p.id] = !!p.stay));
+  const four = match.teamA.concat(match.teamB);
+  const rotators = four.filter((id) => !stayOf[id]); // 要回等待區排隊的人
+  const stayers = four.filter((id) => stayOf[id]); // 連打：直接留在原本的場地
+
+  // 回等待區的人排進隊尾：已打場數少的排前面（同數量隨機）
   const games = countGames(s);
-  const back = match.teamA
-    .concat(match.teamB)
+  const back = rotators
     .map((id) => ({ id, g: games[id] || 0, r: rng() }))
     .sort((a, b) => a.g - b.g || a.r - b.r)
     .map((x) => x.id);
   s.pending.push(...back);
 
+  if (stayers.length === four.length) {
+    // 整組都連打：原班人馬直接再打一場，不動等待區
+    s.seq += 1;
+    s.courts[courtIndex] = { id: "g" + s.seq, teamA: match.teamA, teamB: match.teamB, startedAt: Date.now() };
+    return s;
+  }
+
+  const need = rotators.length; // 連打的人越多，需要遞補的人越少
   fillQueue(s, rng); // 湊滿 4 人就成組
-  if (options.mix !== false) mixFront(s, games);
-  s.courts[courtIndex] = { ...s.queue.shift(), startedAt: Date.now() }; // 最前面的一組上場（pending 已 ≥4，所以一定有）
+  const flat = s.queue.flatMap((g) => g.teamA.concat(g.teamB)).concat(s.pending);
+  const fill = flat.slice(0, need);
+  s.queue = [];
+  s.pending = flat.slice(need);
+  fillQueue(s, rng);
+
+  if (options.mix !== false) mixFront(s, countGames(s));
+
+  const nextFour = stayers.concat(fill);
+  const best = bestSplit(buildPairCounter(s), nextFour, rng);
+  s.seq += 1;
+  s.courts[courtIndex] = { id: "g" + s.seq, teamA: best.a, teamB: best.b, startedAt: Date.now() };
   return s;
+}
+
+/**
+ * 設定某位球員是否「連打」：開啟後，只要他所在的場地結束比賽，他會直接留在原地繼續打下一場，
+ * 不會回到等待區排隊，無視「打一休一」的公平排程，直到手動關閉為止。
+ * @param {Session} session
+ * @param {string} id
+ * @param {boolean} stay
+ * @returns {Session}
+ */
+export function setStay(session, id, stay) {
+  return { ...session, players: session.players.map((p) => (p.id === id ? { ...p, stay: !!stay } : p)) };
 }
 
 /**

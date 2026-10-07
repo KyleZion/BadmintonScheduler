@@ -115,21 +115,51 @@ function finishCourt(session, courtIndex, options = {}) {
 
   const s = clone(session);
   s.history.push({ id: match.id, seq: s.history.length + 1, court: courtIndex + 1, teamA: match.teamA, teamB: match.teamB });
-  s.courts[courtIndex] = null;
 
-  // 結束的 4 人回到隊尾：已打場數少的排前面（同數量隨機）
+  const stayOf = {};
+  s.players.forEach((p) => (stayOf[p.id] = !!p.stay));
+  const four = match.teamA.concat(match.teamB);
+  const rotators = four.filter((id) => !stayOf[id]); // 要回等待區排隊的人
+  const stayers = four.filter((id) => stayOf[id]); // 連打：直接留在原本的場地
+
+  // 回等待區的人排進隊尾：已打場數少的排前面（同數量隨機）
   const games = countGames(s);
-  const back = match.teamA
-    .concat(match.teamB)
+  const back = rotators
     .map((id) => ({ id, g: games[id] || 0, r: rng() }))
     .sort((a, b) => a.g - b.g || a.r - b.r)
     .map((x) => x.id);
   s.pending.push(...back);
 
+  if (stayers.length === four.length) {
+    // 整組都連打：原班人馬直接再打一場，不動等待區
+    s.seq += 1;
+    s.courts[courtIndex] = { id: "g" + s.seq, teamA: match.teamA, teamB: match.teamB, startedAt: Date.now() };
+    return s;
+  }
+
+  const need = rotators.length; // 連打的人越多，需要遞補的人越少
   fillQueue(s, rng); // 湊滿 4 人就成組
-  if (options.mix !== false) mixFront(s, games);
-  s.courts[courtIndex] = { ...s.queue.shift(), startedAt: Date.now() }; // 最前面的一組上場（pending 已 ≥4，所以一定有）
+  const flat = s.queue.flatMap((g) => g.teamA.concat(g.teamB)).concat(s.pending);
+  const fill = flat.slice(0, need);
+  s.queue = [];
+  s.pending = flat.slice(need);
+  fillQueue(s, rng);
+
+  if (options.mix !== false) mixFront(s, countGames(s));
+
+  const nextFour = stayers.concat(fill);
+  const best = bestSplit(buildPairCounter(s), nextFour, rng);
+  s.seq += 1;
+  s.courts[courtIndex] = { id: "g" + s.seq, teamA: best.a, teamB: best.b, startedAt: Date.now() };
   return s;
+}
+
+/**
+ * 設定某位球員是否「連打」：開啟後，只要他所在的場地結束比賽，他會直接留在原地繼續打下一場，
+ * 不會回到等待區排隊，無視「打一休一」的公平排程，直到手動關閉為止。
+ */
+function setStay(session, id, stay) {
+  return { ...session, players: session.players.map((p) => (p.id === id ? { ...p, stay: !!stay } : p)) };
 }
 
 /**
@@ -595,6 +625,7 @@ const ICON = {
   board: "M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z",
   sliders: "M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4",
   leave: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+  repeat: "M17 2 21 6 17 10M3 11V9a4 4 0 0 1 4-4h14M7 22 3 18 7 14M21 13v2a4 4 0 0 1-4 4H3",
 };
 const Ico = (d, cls) =>
   h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", className: cls || "h-4 w-4", "aria-hidden": true }, h("path", { d }));
@@ -679,7 +710,11 @@ function GamesBadge({ n, dim }) {
   );
 }
 
-function PlayerSlot({ name, gender, games, badgeDim, tone, wrap, inner, isOpen, flash, align, onToggle, onClose, children }) {
+/**
+ * 球員方塊：點名字／性別那一側＝點選互換（選到兩個人就直接互換，不用先打開選單）；
+ * 右邊小箭頭是獨立的按鈕，打開完整選單（可以看分類列表、設定連打、讓人離場）。
+ */
+function PlayerSlot({ name, gender, games, badgeDim, stay, selected, tone, wrap, inner, isOpen, flash, align, onPrimaryClick, onToggleMenu, onClose, children }) {
   const ref = useRef(null);
   const [up, setUp] = useState(false);
   useLayoutEffect(() => {
@@ -690,7 +725,7 @@ function PlayerSlot({ name, gender, games, badgeDim, tone, wrap, inner, isOpen, 
     // 手機版有固定在底部的分頁列：先以「向下」量測，放不下、而上方空間較大時改為向上展開
     const bar = document.querySelector('nav[aria-label="主要分頁"]');
     const pop = ref.current && ref.current.querySelector('[role="listbox"]');
-    const trigger = ref.current && ref.current.querySelector("button");
+    const trigger = ref.current && ref.current.querySelector(".chip-ring");
     if (!bar || !pop || !trigger) return;
     const r = trigger.getBoundingClientRect();
     const below = bar.getBoundingClientRect().top - r.bottom - 8;
@@ -717,32 +752,44 @@ function PlayerSlot({ name, gender, games, badgeDim, tone, wrap, inner, isOpen, 
     };
   }, [isOpen]);
 
+  const ring = flash ? "ring-[3px] ring-flash" : selected ? "ring-2 ring-brand" : isOpen ? "ring-2 ring-ink" : "";
   return div(
     { ref, className: wrap || "flex items-center justify-center px-1" },
     div(
       { className: inner || "relative w-full max-w-[9.5rem]" },
-      btn(
-        {
-          type: "button",
-          "aria-haspopup": "listbox",
-          "aria-expanded": isOpen,
-          "aria-label": "更換選手：" + name + (gender ? "（" + G_TEXT[gender] + "）" : ""),
-          onClick: onToggle,
-          className: cx(
-            "chip-ring flex w-full items-center justify-between gap-1 rounded-md px-2.5 py-1.5 text-left text-sm font-bold shadow-sm",
-            tone,
-            flash ? "ring-[3px] ring-flash" : isOpen ? "ring-2 ring-ink" : ""
-          ),
-        },
-        span({ className: "flex min-w-0 items-center gap-1.5" }, GenderMark({ g: gender }), span({ className: "truncate" }, name)),
-        span({ className: "flex shrink-0 items-center gap-1" }, games !== undefined && h(GamesBadge, { n: games, dim: badgeDim }), Ico(ICON.down, "h-3.5 w-3.5 opacity-60"))
+      div(
+        { className: cx("chip-ring flex w-full items-stretch gap-0.5 rounded-md pl-2.5 pr-1 py-1 text-sm font-bold shadow-sm", tone, ring) },
+        btn(
+          {
+            type: "button",
+            "aria-pressed": selected,
+            "aria-label": (selected ? "取消選取：" : "選取互換：") + name + (gender ? "（" + G_TEXT[gender] + "）" : ""),
+            onClick: onPrimaryClick,
+            className: "flex min-w-0 flex-1 items-center gap-1.5 py-0.5 text-left",
+          },
+          GenderMark({ g: gender }),
+          span({ className: "truncate" }, name),
+          stay && span({ title: "連打中：場地結束後直接留下" }, Ico(ICON.repeat, "h-3 w-3 shrink-0 text-brand"))
+        ),
+        games !== undefined && div({ className: "flex shrink-0 items-center" }, h(GamesBadge, { n: games, dim: badgeDim })),
+        btn(
+          {
+            type: "button",
+            "aria-haspopup": "listbox",
+            "aria-expanded": isOpen,
+            "aria-label": "更多操作：" + name,
+            onClick: onToggleMenu,
+            className: "grid shrink-0 place-items-center rounded px-1 opacity-70 hover:opacity-100",
+          },
+          Ico(ICON.down, "h-3.5 w-3.5")
+        )
       ),
       isOpen && children ? React.cloneElement(children, { up }) : null
     )
   );
 }
 
-function SwapMenu({ title, groups, align, up, onPick, onLeave }) {
+function SwapMenu({ title, groups, align, up, onPick, stay, onToggleStay, onLeave }) {
   return div(
     {
       role: "listbox",
@@ -782,14 +829,25 @@ function SwapMenu({ title, groups, align, up, onPick, onLeave }) {
             )
       )
     ),
-    onLeave &&
+    (onToggleStay || onLeave) &&
       div(
-        { className: "shrink-0 border-t border-line p-1.5" },
-        btn(
-          { type: "button", onClick: onLeave, className: "flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold text-warn hover:bg-warn/10" },
-          Ico(ICON.leave, "h-4 w-4"),
-          "此人離場，不再排入"
-        )
+        { className: "shrink-0 space-y-1 border-t border-line p-1.5" },
+        onToggleStay &&
+          btn(
+            {
+              type: "button",
+              onClick: onToggleStay,
+              className: cx("flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold", stay ? "bg-brand/10 text-brand" : "text-ink hover:bg-soft"),
+            },
+            Ico(ICON.repeat, "h-4 w-4"),
+            stay ? "連打中，點此取消" : "標記連打：場地結束後留下"
+          ),
+        onLeave &&
+          btn(
+            { type: "button", onClick: onLeave, className: "flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold text-warn hover:bg-warn/10" },
+            Ico(ICON.leave, "h-4 w-4"),
+            "此人離場，不再排入"
+          )
       )
   );
 }
@@ -809,13 +867,16 @@ function Slot({ id, group, team, slotKey, tone, wrap, inner, align, ctx }) {
       gender: p ? p.gender || null : null,
       games: ctx.games[id] || 0,
       badgeDim: tone === TONE_WAIT,
+      stay: !!(p && p.stay),
+      selected: ctx.selected === id,
       tone,
       wrap,
       inner,
       isOpen: open,
       align,
       flash: !!ctx.flash && ctx.flash.ids.indexOf(id) !== -1,
-      onToggle: () => ctx.setOpenKey(open ? null : slotKey),
+      onPrimaryClick: () => ctx.onSelect(id),
+      onToggleMenu: () => ctx.setOpenKey(open ? null : slotKey),
       onClose: () => ctx.setOpenKey(null),
     },
     open
@@ -824,6 +885,8 @@ function Slot({ id, group, team, slotKey, tone, wrap, inner, align, ctx }) {
           groups: menuGroups(ctx.where, ctx.players, ctx.games, group, team, id),
           align,
           onPick: (newId) => ctx.onPick(id, newId),
+          stay: !!(p && p.stay),
+          onToggleStay: ctx.onToggleStay ? () => ctx.onToggleStay(id) : undefined,
           onLeave: ctx.onLeave ? () => ctx.onLeave(id) : undefined,
         })
       : null
@@ -1207,6 +1270,7 @@ function App() {
   const [newGender, setNewGender] = useState(null); // 新增球員時的預設性別
   const [notice, setNotice] = useState("");
   const [openKey, setOpenKey] = useState(null);
+  const [selected, setSelected] = useState(null); // 點選互換：已選取、等待點第二位的球員 id
   const [flash, setFlash] = useState(null);
   const [msg, setMsg] = useState(null); // 最近一次操作的浮動提示：{ text, undo }
   const [modal, setModal] = useState(null); // 燈箱："status" 球員狀態 / "history" 已結束的比賽 / null
@@ -1238,6 +1302,14 @@ function App() {
       const t = setTimeout(() => setter(value === true ? false : null), ms);
       return () => clearTimeout(t);
     }, [value]);
+  useEffect(() => {
+    if (selected === null) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape") setSelected(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [selected]);
   autoClear(flash, setFlash, 1800);
   autoClear(copied, setCopied, 2000);
   autoClear(expCopied, setExpCopied, 2000);
@@ -1310,6 +1382,7 @@ function App() {
     setMsg(message ? { text: message, undo: true } : null);
     setFlash(flashIds ? { ids: flashIds } : null);
     setOpenKey(null);
+    setSelected(null); // 任何一步操作都讓「點選互換」重新開始，避免殘留指向已經不存在的狀態
   }
   function undoLast() {
     if (undo.length === 0) return;
@@ -1340,6 +1413,27 @@ function App() {
   }
   function pick(curId, newId) {
     commit(swapPlayers(session, curId, newId), null, [curId, newId]);
+  }
+  /**
+   * 點選互換：第一次點選某人只是「選取」，再點另一個人才會互換；
+   * 點同一個人等於取消；commit() 內會在任何操作完成後自動清掉選取狀態。
+   */
+  function selectForSwap(id) {
+    if (selected === null) {
+      setSelected(id);
+      setOpenKey(null);
+      return;
+    }
+    if (selected === id) {
+      setSelected(null);
+      return;
+    }
+    pick(selected, id);
+  }
+  function toggleStay(id) {
+    const cur = byId[id];
+    const next = !(cur && cur.stay);
+    commit(setStay(session, id, next), (cur ? cur.name : "?") + (next ? " 已標記連打，場地結束後會直接留下。" : " 已取消連打，之後會恢復正常輪替。"), [id]);
   }
   function reshuffle() {
     commit(reshuffleWaiting(session), "已重新打散等待區。");
@@ -1540,7 +1634,21 @@ function App() {
   );
 
   /* ---------------- 右側：上場區 / 等待區 ---------------- */
-  const ctx = session && { byId, where, games, counter, players: session.players, openKey, setOpenKey, flash, onPick: pick, onLeave: leave };
+  const ctx = session && {
+    byId,
+    where,
+    games,
+    counter,
+    players: session.players,
+    openKey,
+    setOpenKey,
+    selected,
+    onSelect: selectForSwap,
+    flash,
+    onPick: pick,
+    onToggleStay: toggleStay,
+    onLeave: leave,
+  };
 
   const toolbar = div(
     { className: "mb-4 flex flex-wrap items-end justify-between gap-2" },
@@ -1563,6 +1671,15 @@ function App() {
       { role: "status", className: "mb-4 flex flex-wrap items-center justify-between gap-2 border-l-4 border-warn bg-soft px-3 py-2 text-sm" },
       span(null, "名單或場地數已變更，目前進行中的仍是舊設定。"),
       d.n >= 4 && btn({ type: "button", onClick: generate, className: "font-bold text-brand underline underline-offset-2" }, confirmReset ? "再按一次確認，重新開始" : "套用並重新開始")
+    );
+
+  const selectionBar =
+    selected &&
+    byId[selected] &&
+    div(
+      { role: "status", className: "mb-4 flex flex-wrap items-center justify-between gap-2 border-l-4 border-brand bg-soft px-3 py-2 text-sm" },
+      span(null, "已選取「", span({ className: "font-bold" }, byId[selected].name), "」，點選另一位球員進行互換。"),
+      btn({ type: "button", onClick: () => setSelected(null), className: "font-bold text-brand underline underline-offset-2" }, "取消")
     );
 
   const courtsSection =
@@ -1769,7 +1886,7 @@ function App() {
   if (isMobile) {
     const panel = (child) => section({ className: "rounded-2xl border border-line bg-panel" }, child);
     const mobileBody =
-      tab === "roster" ? panel(roster) : tab === "settings" ? panel(settings) : session ? div(null, mobileActions, staleBar, courtsMobile, waitMobile) : emptyMobile;
+      tab === "roster" ? panel(roster) : tab === "settings" ? panel(settings) : session ? div(null, mobileActions, staleBar, selectionBar, courtsMobile, waitMobile) : emptyMobile;
     return div(
       { className: "min-h-screen" },
       // 手機版不顯示標題列，只保留給讀屏軟體的 h1，內容直接從畫面頂端開始
@@ -1788,7 +1905,7 @@ function App() {
     main(
       { className: "mx-auto grid max-w-6xl items-start gap-8 px-4 pb-20 lg:grid-cols-[21rem_minmax(0,1fr)]" },
       section({ className: "rounded-2xl border border-line bg-panel lg:sticky lg:top-4" }, roster, settings),
-      section(null, toolbar, viewBar, staleBar, courtsSection, waitSection, emptyView)
+      section(null, toolbar, viewBar, staleBar, selectionBar, courtsSection, waitSection, emptyView)
     ),
     modalEl,
     toastEl
