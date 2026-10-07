@@ -122,6 +122,12 @@ function finishCourt(session, courtIndex, options = {}) {
   const rotators = four.filter((id) => !stayOf[id]); // 要回等待區排隊的人
   const stayers = four.filter((id) => stayOf[id]); // 連打：直接留在原本的場地
 
+  // 連打只生效這一次：用掉之後自動清掉標記，下次比賽結束就恢復正常排程，不用手動關閉
+  if (stayers.length > 0) {
+    const used = new Set(stayers);
+    s.players = s.players.map((p) => (used.has(p.id) ? { ...p, stay: false } : p));
+  }
+
   // 回等待區的人排進隊尾：已打場數少的排前面（同數量隨機）
   const games = countGames(s);
   const back = rotators
@@ -155,8 +161,7 @@ function finishCourt(session, courtIndex, options = {}) {
 }
 
 /**
- * 設定某位球員是否「連打」：開啟後，只要他所在的場地結束比賽，他會直接留在原地繼續打下一場，
- * 不會回到等待區排隊，無視「打一休一」的公平排程，直到手動關閉為止。
+ * 標記（或取消標記）某位球員「連打下一場」：只生效一次，用掉之後自動清掉標記。
  */
 function setStay(session, id, stay) {
   return { ...session, players: session.players.map((p) => (p.id === id ? { ...p, stay: !!stay } : p)) };
@@ -769,7 +774,7 @@ function PlayerSlot({ name, gender, games, badgeDim, stay, selected, tone, wrap,
           },
           GenderMark({ g: gender }),
           span({ className: "truncate" }, name),
-          stay && span({ title: "連打中：場地結束後直接留下" }, Ico(ICON.repeat, "h-3 w-3 shrink-0 text-brand"))
+          stay && span({ title: "已標記連打下一場：這場打完會直接留下再打一場（僅這一次）" }, Ico(ICON.repeat, "h-3 w-3 shrink-0 text-brand"))
         ),
         games !== undefined && div({ className: "flex shrink-0 items-center" }, h(GamesBadge, { n: games, dim: badgeDim })),
         btn(
@@ -840,7 +845,7 @@ function SwapMenu({ title, groups, align, up, onPick, stay, onToggleStay, onLeav
               className: cx("flex w-full items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-sm font-bold", stay ? "bg-brand/10 text-brand" : "text-ink hover:bg-soft"),
             },
             Ico(ICON.repeat, "h-4 w-4"),
-            stay ? "連打中，點此取消" : "標記連打：場地結束後留下"
+            stay ? "已標記連打下一場，點此取消" : "連打下一場，這場結束後留下（僅一次）"
           ),
         onLeave &&
           btn(
@@ -1433,7 +1438,7 @@ function App() {
   function toggleStay(id) {
     const cur = byId[id];
     const next = !(cur && cur.stay);
-    commit(setStay(session, id, next), (cur ? cur.name : "?") + (next ? " 已標記連打，場地結束後會直接留下。" : " 已取消連打，之後會恢復正常輪替。"), [id]);
+    commit(setStay(session, id, next), (cur ? cur.name : "?") + (next ? " 已標記連打下一場，這場打完會直接留下（僅這一次）。" : " 已取消連打標記。"), [id]);
   }
   function reshuffle() {
     commit(reshuffleWaiting(session), "已重新打散等待區。");

@@ -125,6 +125,12 @@ export function finishCourt(session, courtIndex, options = {}) {
   const rotators = four.filter((id) => !stayOf[id]); // 要回等待區排隊的人
   const stayers = four.filter((id) => stayOf[id]); // 連打：直接留在原本的場地
 
+  // 連打只生效這一次：用掉之後自動清掉標記，下次比賽結束就恢復正常排程，不用手動關閉
+  if (stayers.length > 0) {
+    const used = new Set(stayers);
+    s.players = s.players.map((p) => (used.has(p.id) ? { ...p, stay: false } : p));
+  }
+
   // 回等待區的人排進隊尾：已打場數少的排前面（同數量隨機）
   const games = countGames(s);
   const back = rotators
@@ -158,8 +164,10 @@ export function finishCourt(session, courtIndex, options = {}) {
 }
 
 /**
- * 設定某位球員是否「連打」：開啟後，只要他所在的場地結束比賽，他會直接留在原地繼續打下一場，
- * 不會回到等待區排隊，無視「打一休一」的公平排程，直到手動關閉為止。
+ * 標記（或取消標記）某位球員「連打下一場」：開啟後，下一次他所在的場地結束比賽時，
+ * 他會直接留在原地再打一場，不會回到等待區排隊，無視「打一休一」的公平排程。
+ * 只生效一次：用掉之後會自動清掉標記，之後恢復正常輪替，不用手動關閉。
+ * 在他的場次結束「之前」，可以隨時用這個函式重新開啟或取消。
  * @param {Session} session
  * @param {string} id
  * @param {boolean} stay
