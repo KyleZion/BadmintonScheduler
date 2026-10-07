@@ -631,6 +631,7 @@ const ICON = {
   sliders: "M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4",
   leave: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
   repeat: "M17 2 21 6 17 10M3 11V9a4 4 0 0 1 4-4h14M7 22 3 18 7 14M21 13v2a4 4 0 0 1-4 4H3",
+  download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
 };
 const Ico = (d, cls) =>
   h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round", className: cls || "h-4 w-4", "aria-hidden": true }, h("path", { d }));
@@ -1067,6 +1068,53 @@ function Modal({ tabs, active, onTab, onClose, children }) {
 /* ------------------------------------------------------------------ *
  * 燈箱內容：球員狀態（誰打了幾場、現在在哪）
  * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ * 隊伍組成甜甜圖：混雙／男雙／女雙的比例，顏色沿用跟性別標籤一樣的藍／粉，
+ * 混雙另外用主色綠區分，一眼就能看出今天的場次是不是太集中在某一種配對。
+ * ------------------------------------------------------------------ */
+function TeamMixDonut({ mix }) {
+  const total = mix.mixed + mix.men + mix.women + mix.unknown;
+  if (total === 0) return null;
+  const parts = [
+    { label: "混雙", n: mix.mixed, color: "var(--brand)" },
+    { label: "男雙", n: mix.men, color: "var(--gm)" },
+    { label: "女雙", n: mix.women, color: "var(--gf)" },
+    { label: "未指定性別", n: mix.unknown, color: "var(--mute)" },
+  ].filter((p) => p.n > 0);
+
+  let acc = 0;
+  const stops = parts
+    .map((p) => {
+      const pct = (p.n / total) * 100;
+      const seg = p.color + " " + acc + "% " + (acc + pct) + "%";
+      acc += pct;
+      return seg;
+    })
+    .join(", ");
+
+  return div(
+    { className: "flex items-center gap-4 py-1" },
+    div(
+      { className: "relative h-20 w-20 shrink-0 rounded-full", style: { background: "conic-gradient(" + stops + ")" } },
+      div(
+        { className: "absolute inset-[9px] flex flex-col items-center justify-center rounded-full bg-panel" },
+        span({ className: "text-base font-bold tabular-nums leading-none" }, total),
+        span({ className: "text-[10px] text-mute" }, "組")
+      )
+    ),
+    div(
+      { className: "flex flex-col gap-1" },
+      parts.map((p) =>
+        div(
+          { key: p.label, className: "flex items-center gap-1.5 text-xs" },
+          span({ className: "h-2.5 w-2.5 shrink-0 rounded-sm", style: { background: p.color } }),
+          span(null, p.label, span({ className: "ml-1 font-bold tabular-nums" }, p.n), " 組", span({ className: "ml-1 text-mute" }, "（" + Math.round((p.n / total) * 100) + "%）"))
+        )
+      )
+    )
+  );
+}
+
 function StatusContent({ session, byId, where, games, counter }) {
   const rowOf = (p) => ({ id: p.id, name: p.name, gender: p.gender || null, games: games[p.id] || 0, at: where.get(p.id) });
   const rows = session.players.filter((p) => !p.left).map(rowOf);
@@ -1074,17 +1122,20 @@ function StatusContent({ session, byId, where, games, counter }) {
   const vals = rows.map((r) => r.games);
   const spread = vals.length ? Math.max.apply(null, vals) - Math.min.apply(null, vals) : 0;
   const mix = teamMix(session.history.concat(session.courts.filter(Boolean)), byId);
-  const mixText =
-    mix.mixed + mix.men + mix.women > 0
-      ? "隊伍組成（已結束加上場中）：混雙 " + mix.mixed + " 組、男雙 " + mix.men + " 組、女雙 " + mix.women + " 組" + (mix.unknown ? "（另有 " + mix.unknown + " 組含未指定性別）" : "") + "。"
-      : "";
   const th = "sticky top-0 bg-panel pb-1.5 pt-1 text-xs font-normal text-mute";
+  const maxGames = Math.max(1, ...rows.concat(leftRows).map((r) => r.games));
+  const gamesBar = (n, muted) =>
+    div(
+      { className: "relative h-4 w-full overflow-hidden rounded bg-soft" },
+      n > 0 && div({ className: cx("absolute inset-y-0 left-0 rounded", muted ? "bg-mute opacity-40" : "bg-brand opacity-70"), style: { width: (n / maxGames) * 100 + "%" } }),
+      span({ className: cx("absolute inset-y-0 right-1 text-[11px] font-bold leading-4 tabular-nums", muted && "opacity-60") }, n)
+    );
   const gridRow = (r, muted) =>
     h(
       React.Fragment,
       { key: r.id },
       span({ className: cx("flex min-w-0 items-center gap-1.5", muted && "opacity-60") }, GenderMark({ g: r.gender }), span({ className: "truncate" }, r.name)),
-      span({ className: cx("text-right tabular-nums", muted && "opacity-60") }, r.games),
+      gamesBar(r.games, muted),
       muted
         ? span({ className: "truncate text-xs text-mute" }, "已離場")
         : span({ className: cx("truncate text-xs", r.at && r.at.zone === "court" ? "font-bold text-brand" : "text-mute") }, r.at ? r.at.label : "")
@@ -1097,11 +1148,12 @@ function StatusContent({ session, byId, where, games, counter }) {
       span(null, "場數差 ", span({ className: "font-bold tabular-nums" }, spread)),
       span({ className: counter.partnerRepeats > 0 ? "text-warn" : "" }, "隊友重複 ", span({ className: "font-bold tabular-nums" }, counter.partnerRepeats))
     ),
-    para({ className: "mb-3 text-xs text-mute" }, "「已打」只計算已結束的比賽；「目前」是此刻所在的位置；場數差只計算仍在場上的人。" + mixText),
+    h(TeamMixDonut, { mix }),
+    para({ className: "mb-3 mt-2 text-xs text-mute" }, "「已打」只計算已結束的比賽，長條愈長代表打愈多場；「目前」是此刻所在的位置；場數差只計算仍在場上的人。隊伍組成含已結束加上場中。"),
     div(
-      { className: "grid grid-cols-[minmax(0,1fr)_3.5rem_6.5rem] items-baseline gap-x-2 gap-y-1.5 text-sm" },
+      { className: "grid grid-cols-[minmax(0,1fr)_6rem_6.5rem] items-center gap-x-2 gap-y-1.5 text-sm" },
       span({ className: th }, "球員"),
-      span({ className: cx(th, "text-right") }, "已打"),
+      span({ className: th }, "已打"),
       span({ className: th }, "目前"),
       rows.map((r) => gridRow(r, false))
     ),
@@ -1109,7 +1161,7 @@ function StatusContent({ session, byId, where, games, counter }) {
       div(
         { className: "mt-4" },
         div({ className: "mb-1.5 text-xs font-medium text-mute" }, "已離場"),
-        div({ className: "grid grid-cols-[minmax(0,1fr)_3.5rem_6.5rem] items-baseline gap-x-2 gap-y-1.5 text-sm" }, leftRows.map((r) => gridRow(r, true)))
+        div({ className: "grid grid-cols-[minmax(0,1fr)_6rem_6.5rem] items-center gap-x-2 gap-y-1.5 text-sm" }, leftRows.map((r) => gridRow(r, true)))
       )
   );
 }
@@ -1117,6 +1169,236 @@ function StatusContent({ session, byId, where, games, counter }) {
 /* ------------------------------------------------------------------ *
  * 燈箱內容：已結束的比賽（最新的在最上面）
  * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ * 燈箱內容：搭檔矩陣 / 對手矩陣
+ *   三角形表格，顏色深淺代表次數多寡；只看目前還在場上的人（已離場的人不列入）。
+ * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ * 把矩陣匯出成一張 PNG 圖片：手刻一份獨立的 SVG（固定用淺色主題，
+ * 不依賴頁面當下的深色/淺色設定，分享出去的圖片才不會一片黑），
+ * 畫完轉成 canvas 存檔，不需要額外的繪圖套件。
+ * ------------------------------------------------------------------ */
+const MX_HEX = { brand: "#17604a", warn: "#a34a00", panel: "#ffffff", ink: "#0f1b16", mute: "#5a6861", line: "#cdd6d2", soft: "#e3e9e6" };
+function hexMix(hex, pct, onto) {
+  const p = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  const [r1, g1, b1] = p(hex);
+  const [r2, g2, b2] = p(onto);
+  const t = pct / 100;
+  const c = (a, b) => Math.round(a * t + b * (1 - t));
+  return "rgb(" + c(r1, r2) + "," + c(g1, g2) + "," + c(b1, b2) + ")";
+}
+function exportMatrixImage(players, vals, max, mode) {
+  const n = players.length;
+  const cell = 34;
+  const rowLabelW = 118;
+  const colHeadH = 112; // 欄標題用旋轉文字，需要較高的空間
+  const pad = 20;
+  const titleH = 40;
+  const w = rowLabelW + n * cell + pad * 2;
+  const h = titleH + colHeadH + n * cell + pad * 2;
+  const colorHex = mode === "partner" ? MX_HEX.brand : MX_HEX.warn;
+  const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const font = "'Noto Sans TC','PingFang TC','Microsoft JhengHei',sans-serif";
+
+  let body = "";
+  body += '<rect width="' + w + '" height="' + h + '" fill="' + MX_HEX.panel + '"/>';
+  body += '<text x="' + pad + '" y="' + (pad + 20) + '" font-family="' + font + '" font-size="16" font-weight="700" fill="' + MX_HEX.ink + '">' + (mode === "partner" ? "搭檔矩陣" : "對手矩陣") + "（" + n + " 人）</text>";
+
+  const gx = pad + rowLabelW;
+  const gy = pad + titleH + colHeadH;
+
+  for (let j = 0; j < n; j++) {
+    const x = gx + j * cell + cell / 2;
+    const y = gy - 6;
+    body += '<text x="' + x + '" y="' + y + '" font-family="' + font + '" font-size="11" fill="' + MX_HEX.mute + '" text-anchor="start" transform="rotate(-55 ' + x + " " + y + ')">' + esc(players[j].name) + "</text>";
+  }
+  for (let i = 0; i < n; i++) {
+    const y = gy + i * cell + cell / 2 + 4;
+    body += '<text x="' + (gx - 8) + '" y="' + y + '" font-family="' + font + '" font-size="12" fill="' + MX_HEX.mute + '" text-anchor="end">' + esc(players[i].name) + "</text>";
+    for (let j = 0; j < n; j++) {
+      const x = gx + j * cell;
+      const yc = gy + i * cell;
+      if (i === j) {
+        body += '<rect x="' + x + '" y="' + yc + '" width="' + cell + '" height="' + cell + '" fill="' + MX_HEX.soft + '" stroke="' + MX_HEX.line + '" stroke-width="1"/>';
+        continue;
+      }
+      const v = vals[i][j];
+      const fill = v > 0 ? hexMix(colorHex, 18 + (v / Math.max(1, max)) * 67, MX_HEX.panel) : MX_HEX.panel;
+      body += '<rect x="' + x + '" y="' + yc + '" width="' + cell + '" height="' + cell + '" fill="' + fill + '" stroke="' + MX_HEX.line + '" stroke-width="1"/>';
+      if (v > 0) body += '<text x="' + (x + cell / 2) + '" y="' + (yc + cell / 2 + 4) + '" font-family="' + font + '" font-size="12" font-weight="700" fill="' + MX_HEX.ink + '" text-anchor="middle">' + v + "</text>";
+    }
+  }
+
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + " " + h + '">' + body + "</svg>";
+  const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    const scale = 2; // @2x 輸出，圖片比較清楚
+    const canvas = document.createElement("canvas");
+    canvas.width = w * scale;
+    canvas.height = h * scale;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(scale, scale);
+    ctx.fillStyle = MX_HEX.panel;
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    URL.revokeObjectURL(url);
+    canvas.toBlob((pngBlob) => {
+      if (!pngBlob) return;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(pngBlob);
+      a.download = (mode === "partner" ? "搭檔矩陣" : "對手矩陣") + ".png";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }, "image/png");
+  };
+  img.onerror = () => URL.revokeObjectURL(url);
+  img.src = url;
+}
+
+function MatrixContent({ session, counter }) {
+  const [mode, setMode] = useState("partner"); // "partner" | "opponent"
+  const [pick, setPick] = useState(null); // 點了哪個格子：{ i, j }，用來十字高亮那一列／那一欄，方便對齊
+  const players = session.players.filter((p) => !p.left);
+  const n = players.length;
+
+  const seg = (key, label) =>
+    btn(
+      {
+        type: "button",
+        "aria-pressed": mode === key,
+        onClick: () => setMode(key),
+        className: cx("px-3 py-1 text-sm", mode === key ? "bg-ink font-bold text-page" : "hover:bg-soft"),
+      },
+      label
+    );
+  const toggleRow = div({ className: "flex overflow-hidden rounded-lg border border-line" }, seg("partner", "搭檔"), seg("opponent", "對手"));
+
+  if (n < 2) {
+    return div(
+      null,
+      div({ className: "mb-3" }, toggleRow),
+      para({ className: "py-8 text-center text-sm text-mute" }, "人數太少，還沒有東西可以比較。")
+    );
+  }
+
+  // 畫滿整個正方形（對角線除外）：數字是對稱的（A配B 等於 B配A），兩邊會長得一樣，方便直接照著列或欄找，不用換算
+  const getVal = mode === "partner" ? counter.partner : counter.opponent;
+  let max = 0;
+  const vals = [];
+  for (let i = 0; i < n; i++) {
+    vals[i] = [];
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue;
+      const v = getVal(players[i].id, players[j].id);
+      vals[i][j] = v;
+      if (v > max) max = v;
+    }
+  }
+  const colorVar = mode === "partner" ? "--brand" : "--warn";
+  const heatBg = (v) => (v > 0 ? "color-mix(in srgb, var(" + colorVar + ") " + Math.round(18 + (v / Math.max(1, max)) * 67) + "%, var(--panel))" : undefined);
+  const short = (name) => name.slice(0, 2);
+  const cellPx = "1.7rem";
+
+  const header = div(
+    { className: "mb-3 flex flex-wrap items-center justify-between gap-2" },
+    toggleRow,
+    div(
+      { className: "flex items-center gap-3" },
+      para({ className: "text-xs text-mute" }, mode === "partner" ? "顏色愈深代表搭檔次數愈多" : "顏色愈深代表對打次數愈多"),
+      btn(
+        { type: "button", onClick: () => exportMatrixImage(players, vals, max, mode), className: BTN_GHOST },
+        Ico(ICON.download, "h-3.5 w-3.5"),
+        "匯出圖片"
+      )
+    )
+  );
+
+  const cells = [];
+  for (let j = 0; j < n; j++) {
+    const hit = !!pick && pick.j === j;
+    cells.push(
+      div(
+        {
+          key: "ch" + j,
+          title: players[j].name,
+          style: { gridColumn: j + 2, gridRow: 1 },
+          className: cx(
+            "sticky top-0 z-10 flex items-end justify-center overflow-hidden border-b border-line pb-1 text-[10px]",
+            hit ? "bg-ink font-bold text-page" : "bg-panel text-mute"
+          ),
+        },
+        short(players[j].name)
+      )
+    );
+  }
+  for (let i = 0; i < n; i++) {
+    // 列標題
+    const rowHit = !!pick && pick.i === i;
+    cells.push(
+      div(
+        {
+          key: "rh" + i,
+          title: players[i].name,
+          style: { gridColumn: 1, gridRow: i + 2 },
+          className: cx(
+            "sticky left-0 z-10 flex items-center justify-end overflow-hidden border-r border-line pr-1.5 text-[10px]",
+            rowHit ? "bg-ink font-bold text-page" : "bg-panel text-mute"
+          ),
+        },
+        short(players[i].name)
+      )
+    );
+    for (let j = 0; j < n; j++) {
+      if (i === j) {
+        cells.push(div({ key: i + "-" + j, style: { gridColumn: j + 2, gridRow: i + 2 }, className: "border-r border-b border-line bg-soft" }));
+        continue;
+      }
+      const v = vals[i][j];
+      const hit = !!pick && (pick.i === i || pick.j === j);
+      const picked = !!pick && pick.i === i && pick.j === j;
+      cells.push(
+        div(
+          {
+            key: i + "-" + j,
+            title: players[i].name + " × " + players[j].name + "：" + v + " 次",
+            onClick: () => setPick(picked ? null : { i, j }),
+            style: { gridColumn: j + 2, gridRow: i + 2, background: heatBg(v) },
+            className: cx(
+              "flex cursor-pointer items-center justify-center border-r border-b border-line text-[11px] tabular-nums",
+              v > 0 ? "font-bold" : "text-mute",
+              picked ? "ring-2 ring-inset ring-ink" : hit && "ring-1 ring-inset ring-ink/50"
+            ),
+          },
+          v > 0 ? v : ""
+        )
+      );
+    }
+  }
+
+  return div(
+    null,
+    header,
+    div(
+      { className: "overflow-auto rounded-lg border border-line", style: { maxHeight: "55vh" } },
+      div(
+        {
+          className: "grid",
+          style: { gridTemplateColumns: "2.4rem repeat(" + n + ", " + cellPx + ")", gridTemplateRows: "1.4rem repeat(" + n + ", " + cellPx + ")" },
+        },
+        cells
+      )
+    ),
+    para(
+      { className: "mt-2 text-xs text-mute" },
+      "空白代表還沒" + (mode === "partner" ? "搭檔" : "對打") + "過；點一個格子可以讓那一列、那一欄對齊的名字反白，方便對準。已離場的人不列入統計。"
+    )
+  );
+}
+
 function HistoryContent({ session, byId }) {
   const nm = (ids) => ids.map((id) => (byId[id] ? byId[id].name : "?")).join("、");
   const list = session.history.slice().reverse();
@@ -1760,6 +2042,7 @@ function App() {
     div(
       { className: "mb-5 flex flex-wrap gap-2" },
       btn({ type: "button", onClick: () => openModal("status"), className: BTN_GHOST }, Ico(ICON.users), "球員狀態"),
+      btn({ type: "button", onClick: () => openModal("matrix"), className: BTN_GHOST }, Ico(ICON.board), "搭檔／對手矩陣"),
       btn(
         { type: "button", onClick: () => openModal("history"), className: BTN_GHOST },
         Ico(ICON.list),
@@ -1779,13 +2062,14 @@ function App() {
       {
         tabs: [
           { key: "status", label: "球員狀態" },
+          { key: "matrix", label: "矩陣" },
           { key: "history", label: "已結束的比賽", badge: session.history.length },
         ],
         active: modal,
         onTab: setModal,
         onClose: () => setModal(null),
       },
-      modal === "status" ? h(StatusContent, { session, byId, where, games, counter }) : h(HistoryContent, { session, byId })
+      modal === "status" ? h(StatusContent, { session, byId, where, games, counter }) : modal === "matrix" ? h(MatrixContent, { session, counter }) : h(HistoryContent, { session, byId })
     );
 
   const emptyView =
@@ -1821,6 +2105,7 @@ function App() {
         copied === "ok" ? "已複製" : copied === "fail" ? "複製失敗" : null
       ),
       btn({ type: "button", onClick: () => openModal("status"), className: smallBtn }, Ico(ICON.users, "h-3.5 w-3.5"), "球員狀態"),
+      btn({ type: "button", onClick: () => openModal("matrix"), className: smallBtn }, Ico(ICON.board, "h-3.5 w-3.5"), "矩陣"),
       btn({ type: "button", onClick: () => openModal("history"), className: smallBtn }, Ico(ICON.list, "h-3.5 w-3.5"), "已結束 " + session.history.length)
     );
 
